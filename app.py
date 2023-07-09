@@ -4,6 +4,7 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('-s',
                     '--stack_arn', required=True,
+                    metavar='<Full-Stack-arn>',
                     help='Specify the full stack arn of stack which is in UPDATE_ROLLBACK_FAILED')
 
 cfn = boto3.client('cloudformation')
