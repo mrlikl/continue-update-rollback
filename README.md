@@ -35,5 +35,5 @@ python3 app.py -s <stack-full-arn>
 or
 
 ```
-python3 app.py -stack_arn <stack-full-arn>
+python3 app.py --stack_arn <stack-full-arn>
 ```
