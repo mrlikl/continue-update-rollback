@@ -16,15 +16,11 @@ cancelled_status = 'Resource update cancelled'
 
 
 def check_resource_status(status):
-    return False if status.startswith(cancelled_status) else True
+    return not status.startswith(cancelled_status)
 
 
 def find_failed_resources(summary):
-    resources = []
-    for i in summary:
-        if i['ResourceStatus'] == 'UPDATE_FAILED':
-            resources.append(i)
-    return resources
+    return [i for i in summary if i['ResourceStatus'] == 'UPDATE_FAILED']
 
 
 def find_failed_resources_in_nested_stacks(stack_arn):
@@ -83,17 +79,19 @@ else:
     failed_resources = [
         x['LogicalResourceId'] for x in failed_resources]
 
-    while len(failed_nested_stacks) > 0:
+    while failed_nested_stacks:
         popped_stack = failed_nested_stacks.pop(0)
         failed_resources += find_failed_resources_in_nested_stacks(
             popped_stack['PhysicalResourceId'])
 
-    if len(failed_resources) == 0:
+    if not failed_resources:
         print("No update failed resources")
+        cli_command = "aws cloudformation continue-update-rollback --stack-name " + \
+            root_stack_summary['StackName']
+        print(cli_command)
     else:
         cli_command = "aws cloudformation continue-update-rollback --stack-name " + \
             root_stack_summary['StackName']
         cli_command += " --resources-to-skip "
-        join_list = ' '.join(map(str, failed_resources))
-        cli_command += join_list
+        cli_command += ' '.join(failed_resources)
         print(cli_command)
