@@ -13,7 +13,41 @@ args = parser.parse_args()
 
 failed_nested_stacks = []
 failed_resources = []
+skippable_resources = set()
 cancelled_status = 'Resource update cancelled'
+start_event = "UPDATE_ROLLBACK_FAILED"
+end_event = "UPDATE_ROLLBACK_IN_PROGRESS"
+
+
+def get_stack_events(stack_arn):
+    response = cfn.describe_stack_events(
+        StackName=stack_arn
+    )
+    return response['StackEvents']
+
+
+def parse_stack_events(stack_events, is_root_stack):
+    global skippable_resources
+    events_in = []
+    if stack_events[0]['ResourceStatus'] == start_event:
+        running = True
+        n = 0
+        while running:
+            events_in.append(stack_events[n])
+            if stack_events[n]['ResourceStatus'] == end_event:
+                running = False
+            n += 1
+    events_in = [x
+                 for x in events_in if x['ResourceType'] != 'AWS::CloudFormation::Stack']
+
+    if is_root_stack:
+        skippable_resources.update([x['LogicalResourceId']
+                                    for x in events_in if x['ResourceStatus'] == 'UPDATE_FAILED' and
+                                    x['ResourceStatusReason'] != cancelled_status])
+    else:
+        skippable_resources.update([x['StackName']+"."+x['LogicalResourceId']
+                                    for x in events_in if x['ResourceStatus'] == 'UPDATE_FAILED' and
+                                    x['ResourceStatusReason'] != cancelled_status])
 
 
 def check_resource_status(status):
@@ -60,13 +94,22 @@ def describe_stack_resources(stack_arn):
         return -1
 
 
-root_stack = name = args.stack_arn
+root_stack = args.stack_arn
 
 root_stack_summary = describe_stack_status(root_stack)
 
-if root_stack_summary['StackStatus'] != 'UPDATE_ROLLBACK_FAILED':
-    print("cannot continue update rollback on stack that is not in UPDATE_ROLLBACK_FAILED state")
-else:
+
+def pre_checks():
+    if "ParentId" in root_stack_summary or "RootId" in root_stack_summary:
+        print("Pass the root stack arn")
+        return False
+    if root_stack_summary['StackStatus'] != 'UPDATE_ROLLBACK_FAILED':
+        print("cannot continue update rollback on stack that is not in UPDATE_ROLLBACK_FAILED state")
+        return False
+    return True
+
+
+if pre_checks():
     resources = describe_stack_resources(root_stack)
     failed_resources += find_failed_resources(resources)
 
@@ -80,10 +123,19 @@ else:
     failed_resources = [
         x['LogicalResourceId'] for x in failed_resources]
 
+    root_events = get_stack_events(root_stack)
+
+    parse_stack_events(root_events, is_root_stack=True)
+
     while failed_nested_stacks:
         popped_stack = failed_nested_stacks.pop(0)
+        nested_events = get_stack_events(popped_stack['PhysicalResourceId'])
+        parse_stack_events(nested_events, is_root_stack=False)
         failed_resources += find_failed_resources_in_nested_stacks(
             popped_stack['PhysicalResourceId'])
+
+    failed_resources = [
+        value for value in failed_resources if value in skippable_resources]
 
     if not failed_resources:
         print("No update failed resources")
