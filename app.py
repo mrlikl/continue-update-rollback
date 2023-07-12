@@ -13,8 +13,14 @@ args = parser.parse_args()
 
 failed_nested_stacks = []
 failed_resources = []
-skippable_resources = set()
+skippable_resources = []
+skippable_nested_stacks = []
+update_failed_nested_stacks = []
+update_failed_nested_stacks_name = []
+nested_stack_arn_map = {}
 cancelled_status = 'Resource update cancelled'
+nested_skippable_statuses = ["DELETE_COMPLETE",
+                             "DELETE_IN_PROGRESS", "DELETE_FAILED"]
 start_event = "UPDATE_ROLLBACK_FAILED"
 end_event = "UPDATE_ROLLBACK_IN_PROGRESS"
 
@@ -28,26 +34,40 @@ def get_stack_events(stack_arn):
 
 def parse_stack_events(stack_events, is_root_stack):
     global skippable_resources
+    global update_failed_nested_stacks
     events_in = []
-    if stack_events[0]['ResourceStatus'] == start_event:
+    if stack_events[0]['ResourceStatus'] == start_event and stack_events[1]['ResourceStatus'] != end_event:
         running = True
-        n = 0
+        n = 1
         while running:
-            events_in.append(stack_events[n])
+            if stack_events[n]['ResourceStatus'] != end_event:
+                events_in.append(stack_events[n])
             if stack_events[n]['ResourceStatus'] == end_event:
                 running = False
             n += 1
-    events_in = [x
-                 for x in events_in if x['ResourceType'] != 'AWS::CloudFormation::Stack']
 
-    if is_root_stack:
-        skippable_resources.update([x['LogicalResourceId']
-                                    for x in events_in if x['ResourceStatus'] == 'UPDATE_FAILED' and
-                                    x['ResourceStatusReason'] != cancelled_status])
-    else:
-        skippable_resources.update([x['StackName']+"."+x['LogicalResourceId']
-                                    for x in events_in if x['ResourceStatus'] == 'UPDATE_FAILED' and
-                                    x['ResourceStatusReason'] != cancelled_status])
+        if is_root_stack:
+            resource_events = [x
+                               for x in events_in if x['ResourceType'] != 'AWS::CloudFormation::Stack']
+            nested_stack_events = [x
+                                   for x in events_in if x['ResourceType'] == 'AWS::CloudFormation::Stack']
+            skippable_resources.extend([x['LogicalResourceId']
+                                        for x in resource_events if x['ResourceStatus'] == 'UPDATE_FAILED' and
+                                        x['ResourceStatusReason'] != cancelled_status])
+            update_failed_nested_stacks.extend([x['PhysicalResourceId']
+                                               for x in nested_stack_events if x['ResourceStatus'] == 'UPDATE_FAILED' and
+                                               x['ResourceStatusReason'] != cancelled_status])
+        else:
+            resource_events = [x
+                               for x in events_in if x['ResourceType'] != 'AWS::CloudFormation::Stack']
+            nested_stack_events = [x
+                                   for x in events_in if x['ResourceType'] == 'AWS::CloudFormation::Stack']
+            skippable_resources.extend([x['StackName']+"."+x['LogicalResourceId']
+                                       for x in resource_events if x['ResourceStatus'] == 'UPDATE_FAILED' and
+                                       x['ResourceStatusReason'] != cancelled_status])
+            update_failed_nested_stacks.extend([x['PhysicalResourceId']
+                                               for x in nested_stack_events if x['ResourceStatus'] == 'UPDATE_FAILED' and
+                                               x['ResourceStatusReason'] != cancelled_status])
 
 
 def check_resource_status(status):
@@ -129,13 +149,31 @@ if pre_checks():
 
     while failed_nested_stacks:
         popped_stack = failed_nested_stacks.pop(0)
-        nested_events = get_stack_events(popped_stack['PhysicalResourceId'])
-        parse_stack_events(nested_events, is_root_stack=False)
-        failed_resources += find_failed_resources_in_nested_stacks(
+        nested_stack_summary = describe_stack_status(
             popped_stack['PhysicalResourceId'])
+        if nested_stack_summary['StackStatus'] in nested_skippable_statuses:
+            if popped_stack['StackId'] == root_stack:
+                nested_stack_arn_map[popped_stack['PhysicalResourceId']
+                                     ] = popped_stack['LogicalResourceId']
+            else:
+                nested_stack_arn_map[popped_stack['PhysicalResourceId']
+                                     ] = popped_stack['StackName'] + "."+popped_stack['LogicalResourceId']
+            skippable_nested_stacks.append(popped_stack['PhysicalResourceId'])
+        else:
+            nested_events = get_stack_events(
+                popped_stack['PhysicalResourceId'])
+            parse_stack_events(nested_events, is_root_stack=False)
+            failed_resources += find_failed_resources_in_nested_stacks(
+                popped_stack['PhysicalResourceId'])
 
     failed_resources = [
         value for value in failed_resources if value in skippable_resources]
+
+    update_failed_nested_stacks_name.extend(
+        nested_stack_arn_map[key] for key in update_failed_nested_stacks if key in nested_stack_arn_map
+    )
+
+    failed_resources.extend(x for x in update_failed_nested_stacks_name)
 
     if not failed_resources:
         print("No update failed resources")
