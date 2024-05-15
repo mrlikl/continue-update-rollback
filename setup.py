@@ -9,7 +9,7 @@ setup(
     packages=find_packages(),
     entry_points={
         'console_scripts': [
-            'cfn-cur = app:main'
+            'cfn-cur = continue_update_rollback.app:main'
         ]
     }
 )

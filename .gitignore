@@ -1,3 +1,4 @@
 tests/*
 continue_update_rollback.egg-info/*
 __pycache__/*
+continue_update_rollback/__pycache__/*

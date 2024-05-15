@@ -113,7 +113,8 @@ def pre_checks(root_stack_summary):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-s', required=True,
+    parser.add_argument('-s',
+                        '--stack_arn', required=True,
                         metavar='[Full Stack ARN]',
                         help='Specify the full stack ARN of stack which is in UPDATE_ROLLBACK_FAILED')    
     args = parser.parse_args()
