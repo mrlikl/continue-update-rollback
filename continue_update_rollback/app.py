@@ -1,5 +1,6 @@
 import boto3
 import argparse
+import sys
 
 
 failed_nested_stacks = []
@@ -11,16 +12,33 @@ update_failed_nested_stacks_name = []
 nested_stack_arn_map = {}
 cancelled_status = 'Resource update cancelled'
 
-cfn = boto3.client('cloudformation')
 
-def get_stack_events(stack_arn):
+def get_stack_events(stack_arn, cfn):
+    """
+    Retrieve stack events for a given stack ARN.
+    
+    Args:
+        stack_arn (str): The ARN of the CloudFormation stack
+        cfn: The boto3 CloudFormation client
+        
+    Returns:
+        list: Stack events
+    """
     response = cfn.describe_stack_events(
         StackName=stack_arn
     )
     return response['StackEvents']
 
 
-def parse_stack_events(stack_events, is_root_stack):
+def parse_stack_events(stack_events, is_root_stack, cfn):
+    """
+    Parse stack events to identify failed resources.
+    
+    Args:
+        stack_events (list): List of stack events
+        is_root_stack (bool): Whether this is the root stack
+        cfn: The boto3 CloudFormation client
+    """
     global skippable_resources
     global update_failed_nested_stacks
     start_event = "UPDATE_ROLLBACK_FAILED"
@@ -61,17 +79,45 @@ def parse_stack_events(stack_events, is_root_stack):
 
 
 def check_resource_status(status):
+    """
+    Check if resource status is not cancelled.
+    
+    Args:
+        status (str): Resource status reason
+        
+    Returns:
+        bool: True if status is not cancelled
+    """
     return not status.startswith(cancelled_status)
 
 
 def find_failed_resources(summary):
+    """
+    Find resources with UPDATE_FAILED status.
+    
+    Args:
+        summary (list): List of resources
+        
+    Returns:
+        list: Failed resources
+    """
     return [i for i in summary if i['ResourceStatus'] == 'UPDATE_FAILED']
 
 
-def find_failed_resources_in_nested_stacks(stack_arn):
+def find_failed_resources_in_nested_stacks(stack_arn, cfn):
+    """
+    Find failed resources in nested stacks.
+    
+    Args:
+        stack_arn (str): The ARN of the CloudFormation stack
+        cfn: The boto3 CloudFormation client
+        
+    Returns:
+        list: Failed resources
+    """
     global failed_nested_stacks
     resources = []
-    summary = describe_stack_resources(stack_arn)
+    summary = describe_stack_resources(stack_arn, cfn)
     for i in summary:
         if i['ResourceStatus'] == 'UPDATE_FAILED':
             if i['ResourceType'] == 'AWS::CloudFormation::Stack':
@@ -82,7 +128,17 @@ def find_failed_resources_in_nested_stacks(stack_arn):
     return resources
 
 
-def describe_stack_status(stack_arn):
+def describe_stack_status(stack_arn, cfn):
+    """
+    Describe the status of a stack.
+    
+    Args:
+        stack_arn (str): The ARN of the CloudFormation stack
+        cfn: The boto3 CloudFormation client
+        
+    Returns:
+        dict: Stack details or -1 if error
+    """
     response = cfn.describe_stacks(
         StackName=stack_arn,
     )
@@ -92,7 +148,18 @@ def describe_stack_status(stack_arn):
         print(response['ResponseMetadata'])
         return -1
 
-def describe_stack_resources(stack_arn):
+
+def describe_stack_resources(stack_arn, cfn):
+    """
+    Describe resources in a stack.
+    
+    Args:
+        stack_arn (str): The ARN of the CloudFormation stack
+        cfn: The boto3 CloudFormation client
+        
+    Returns:
+        list: Stack resources or -1 if error
+    """
     response = cfn.describe_stack_resources(
         StackName=stack_arn,
     )
@@ -102,7 +169,17 @@ def describe_stack_resources(stack_arn):
         print(response['ResponseMetadata'])
         return -1
 
+
 def pre_checks(root_stack_summary):
+    """
+    Perform pre-checks on the stack.
+    
+    Args:
+        root_stack_summary (dict): Stack summary
+        
+    Returns:
+        bool: True if checks pass
+    """
     if "ParentId" in root_stack_summary or "RootId" in root_stack_summary:
         print("Pass the root stack arn")
         return False
@@ -111,15 +188,37 @@ def pre_checks(root_stack_summary):
         return False
     return True
 
+
 def main():
-    parser = argparse.ArgumentParser()
+    """
+    Main function to generate continue-update-rollback command.
+    """
+    parser = argparse.ArgumentParser(
+        description='Generate AWS CLI command to continue update rollback of CloudFormation stacks'
+    )
     parser.add_argument('-s',
                         '--stack_arn', required=True,
                         metavar='[Full Stack ARN]',
-                        help='Specify the full stack ARN of stack which is in UPDATE_ROLLBACK_FAILED')    
+                        help='Specify the full stack ARN of stack which is in UPDATE_ROLLBACK_FAILED')
+    
+    # Add version argument
+    parser.add_argument('-v', '--version', action='store_true',
+                        help='Show version information and exit')
+    
     args = parser.parse_args()
+    
+    # Handle version display
+    if args.version:
+        from continue_update_rollback import __version__
+        print(f"cfn-cur version {__version__}")
+        sys.exit(0)
+    
     root_stack = args.stack_arn
-    root_stack_summary = describe_stack_status(root_stack)
+    
+    # Initialize boto3 client
+    cfn = boto3.client('cloudformation')
+    
+    root_stack_summary = describe_stack_status(root_stack, cfn)
     global failed_nested_stacks
     global failed_resources
     global skippable_resources
@@ -130,7 +229,7 @@ def main():
     nested_skippable_statuses = ["DELETE_COMPLETE",
                              "DELETE_IN_PROGRESS", "DELETE_FAILED"]
     if pre_checks(root_stack_summary):
-        resources = describe_stack_resources(root_stack)
+        resources = describe_stack_resources(root_stack, cfn)
         failed_resources += find_failed_resources(resources)
 
         for i in failed_resources:
@@ -143,14 +242,14 @@ def main():
         failed_resources = [
             x['LogicalResourceId'] for x in failed_resources]
 
-        root_events = get_stack_events(root_stack)
+        root_events = get_stack_events(root_stack, cfn)
 
-        parse_stack_events(root_events, is_root_stack=True)
+        parse_stack_events(root_events, is_root_stack=True, cfn=cfn)
 
         while failed_nested_stacks:
             popped_stack = failed_nested_stacks.pop(0)
             nested_stack_summary = describe_stack_status(
-                popped_stack['PhysicalResourceId'])
+                popped_stack['PhysicalResourceId'], cfn)
             if nested_stack_summary['StackStatus'] in nested_skippable_statuses:
                 if popped_stack['StackId'] == root_stack:
                     nested_stack_arn_map[popped_stack['PhysicalResourceId']
@@ -161,10 +260,10 @@ def main():
                 skippable_nested_stacks.append(popped_stack['PhysicalResourceId'])
             else:
                 nested_events = get_stack_events(
-                    popped_stack['PhysicalResourceId'])
-                parse_stack_events(nested_events, is_root_stack=False)
+                    popped_stack['PhysicalResourceId'], cfn)
+                parse_stack_events(nested_events, is_root_stack=False, cfn=cfn)
                 failed_resources += find_failed_resources_in_nested_stacks(
-                    popped_stack['PhysicalResourceId'])
+                    popped_stack['PhysicalResourceId'], cfn)
 
         failed_resources = [
             value for value in failed_resources if value in skippable_resources]
@@ -186,6 +285,7 @@ def main():
             cli_command += " --resources-to-skip "
             cli_command += ' '.join(failed_resources)
             print(cli_command)
+
 
 if __name__ == "__main__":
     main()
